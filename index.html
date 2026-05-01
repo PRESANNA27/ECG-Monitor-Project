@@ -1,0 +1,1542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ECG Monitor — ESP32 Live Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+/* ══════════════════════════════════════
+   DESIGN TOKENS
+══════════════════════════════════════ */
+:root {
+  --bg:          #030f0a;
+  --panel:       #04120d;
+  --panel-alt:   #051a10;
+  --border:      #0a3020;
+  --border-hi:   #12503a;
+  --green:       #00ff88;
+  --green-dim:   #00b055;
+  --green-glow:  rgba(0,255,136,0.22);
+  --green-faint: rgba(0,255,136,0.07);
+  --red:         #ff3060;
+  --red-dim:     rgba(255,48,96,0.18);
+  --yellow:      #ffd60a;
+  --cyan:        #00e5ff;
+  --purple:      #c47aff;
+  --text:        #c0f0da;
+  --text-dim:    #3a8060;
+  --text-muted:  #1e4830;
+  --radius:      5px;
+  --gap:         10px;
+  --font-mono:   'Share Tech Mono', monospace;
+  --font-display:'Orbitron', sans-serif;
+}
+
+/* ══════════════════════════════════════
+   RESET & BASE
+══════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%; height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  overflow-x: hidden;
+}
+
+/* CRT scanlines overlay */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    0deg, transparent, transparent 2px,
+    rgba(0,0,0,0.10) 2px, rgba(0,0,0,0.10) 4px
+  );
+  pointer-events: none; z-index: 9999;
+}
+
+/* Vignette */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: radial-gradient(ellipse at 50% 50%, transparent 55%, rgba(0,0,0,0.65) 100%);
+  pointer-events: none; z-index: 9998;
+}
+
+/* ══════════════════════════════════════
+   APP SHELL
+══════════════════════════════════════ */
+.app {
+  display: grid;
+  grid-template-rows: 56px auto 1fr auto 36px;
+  min-height: 100dvh;
+  padding: 10px;
+  gap: var(--gap);
+}
+
+/* ══════════════════════════════════════
+   HEADER
+══════════════════════════════════════ */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  position: relative;
+  overflow: hidden;
+}
+header::after {
+  content: '';
+  position: absolute; bottom: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--green-dim), transparent);
+}
+
+.logo {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 1rem;
+  letter-spacing: 0.2em;
+  color: var(--green);
+  text-shadow: 0 0 18px var(--green-dim), 0 0 40px rgba(0,255,136,0.12);
+}
+.logo em {
+  font-style: normal;
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 0.7em;
+  letter-spacing: 0.1em;
+}
+
+.header-meta {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+/* ─ strips in header ─ */
+.chip-row { display: flex; gap: 12px; }
+.chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 10px;
+  border-left: 1px solid var(--border);
+}
+.chip:first-child { border-left: none; }
+.chip-lbl { font-size: 0.5rem; color: var(--text-muted); letter-spacing: 0.2em; }
+.chip-val { font-family: var(--font-display); font-size: 0.8rem; color: var(--cyan); }
+
+.clock {
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  min-width: 72px;
+  text-align: right;
+}
+
+/* ─ status badge ─ */
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 13px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  font-size: 0.62rem;
+  letter-spacing: 0.15em;
+  background: rgba(0,0,0,0.3);
+  transition: all 0.4s;
+}
+.status-badge.sim   { border-color: rgba(196,122,255,0.5); background: rgba(196,122,255,0.06); color: var(--purple); }
+.status-badge.live  { border-color: var(--green-dim); background: var(--green-faint); color: var(--green); }
+.status-badge.conn  { border-color: var(--cyan); background: rgba(0,229,255,0.06); color: var(--cyan); animation: blink 0.6s infinite; }
+.status-badge.disc  { border-color: var(--red); background: rgba(255,48,96,0.07); color: var(--red); }
+.status-badge.lost  { border-color: var(--yellow); background: rgba(255,214,10,0.06); color: var(--yellow); animation: blink 1s infinite; }
+
+.dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: all 0.3s;
+}
+.dot.sim  { background: var(--purple); box-shadow: 0 0 10px var(--purple); }
+.dot.live { background: var(--green);  box-shadow: 0 0 14px var(--green); animation: pulse-dot 1.8s infinite; }
+.dot.conn { background: var(--cyan);   box-shadow: 0 0 10px var(--cyan); animation: blink 0.5s infinite; }
+.dot.disc { background: var(--red);    box-shadow: 0 0 10px var(--red); }
+.dot.lost { background: var(--yellow); box-shadow: 0 0 10px var(--yellow); }
+
+@keyframes pulse-dot {
+  0%,100% { box-shadow: 0 0 8px var(--green); }
+  50%      { box-shadow: 0 0 22px var(--green), 0 0 40px rgba(0,255,136,0.3); }
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+/* ══════════════════════════════════════
+   CONTROL BAR
+══════════════════════════════════════ */
+.ctrl-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  flex-wrap: wrap;
+}
+.ctrl-group { display: flex; align-items: center; gap: 8px; }
+.ctrl-sep   { width: 1px; height: 26px; background: var(--border); flex-shrink: 0; }
+.ctrl-lbl   { font-size: 0.57rem; color: var(--text-muted); letter-spacing: 0.15em; white-space: nowrap; }
+
+.ip-field {
+  background: rgba(0,0,0,0.5);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  padding: 6px 12px;
+  outline: none;
+  width: 155px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.ip-field:focus { border-color: var(--green-dim); box-shadow: 0 0 0 2px rgba(0,255,136,0.08); }
+.ip-field::placeholder { color: var(--text-muted); }
+
+/* buttons */
+.btn {
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  border: 1px solid;
+  transition: all 0.2s;
+  white-space: nowrap;
+  outline: none;
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-connect    { background: rgba(0,255,136,0.1); border-color: var(--green-dim); color: var(--green); }
+.btn-connect:not(:disabled):hover { background: rgba(0,255,136,0.22); box-shadow: 0 0 16px rgba(0,255,136,0.25); }
+
+.btn-disconnect { background: rgba(255,48,96,0.1); border-color: var(--red); color: var(--red); display: none; }
+.btn-disconnect:hover { background: rgba(255,48,96,0.22); }
+
+.btn-sim        { background: rgba(196,122,255,0.1); border-color: rgba(196,122,255,0.4); color: var(--purple); }
+.btn-sim:hover  { background: rgba(196,122,255,0.22); }
+
+/* sim-mode toggles */
+.btn-mode {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: rgba(0,0,0,0.3);
+  transition: all 0.2s;
+}
+.btn-mode:hover  { border-color: var(--green-dim); color: var(--green); }
+.btn-mode.active { background: rgba(0,255,136,0.1); border-color: var(--green-dim); color: var(--green); }
+
+.reconn-label {
+  display: none;
+  font-size: 0.58rem;
+  color: var(--yellow);
+  letter-spacing: 0.1em;
+  animation: blink 1s infinite;
+}
+.reconn-label.show { display: inline; }
+
+/* ══════════════════════════════════════
+   MAIN GRID
+══════════════════════════════════════ */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: var(--gap);
+  min-height: 0;
+}
+
+/* ─ left column ─ */
+.left { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
+
+/* ─ card base ─ */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 13px;
+}
+.card-hdr {
+  font-size: 0.57rem;
+  color: var(--text-dim);
+  letter-spacing: 0.22em;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-hdr::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+/* ══════════════════════════════════════
+   ECG CANVAS CARD
+══════════════════════════════════════ */
+.ecg-card { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.ecg-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 200px;
+}
+#ecgCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 4px;
+  background: #010e06;
+  cursor: crosshair;
+}
+
+/* overlay labels */
+.ecg-overlay-tl {
+  position: absolute; top: 8px; left: 10px;
+  font-size: 0.6rem; color: var(--text-dim); pointer-events: none;
+}
+.ecg-overlay-tr {
+  position: absolute; top: 8px; right: 10px;
+  font-size: 0.6rem; color: var(--text-dim); pointer-events: none;
+}
+.ecg-mode-tag {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+  font-size: 0.58rem; letter-spacing: 0.14em;
+  padding: 2px 10px; border-radius: 10px;
+  pointer-events: none; transition: all 0.4s;
+}
+.ecg-mode-tag.sim  { color: var(--purple); border: 1px solid rgba(196,122,255,0.3); background: rgba(196,122,255,0.07); }
+.ecg-mode-tag.live { color: var(--green);  border: 1px solid rgba(0,255,136,0.3);   background: var(--green-faint); }
+
+/* lead-off overlay */
+.lead-off {
+  display: none;
+  position: absolute; inset: 0;
+  background: rgba(255,48,96,0.06);
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+}
+.lead-off.show { display: flex; }
+.lead-off-icon { font-size: 2rem; color: var(--red); animation: blink 1s infinite; }
+.lead-off-text { font-size: 0.8rem; color: var(--red); letter-spacing: 0.15em; }
+
+/* ══════════════════════════════════════
+   METRICS ROW
+══════════════════════════════════════ */
+.metrics-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--gap);
+}
+.metric {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 13px;
+  position: relative;
+  overflow: hidden;
+}
+.metric::before {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(135deg, transparent 60%, rgba(0,255,136,0.06));
+  opacity: 0; transition: opacity 0.3s;
+}
+.metric:hover::before { opacity: 1; }
+.metric-lbl { font-size: 0.55rem; color: var(--text-dim); letter-spacing: 0.18em; margin-bottom: 5px; }
+.metric-val {
+  font-family: var(--font-display);
+  font-size: 1.45rem;
+  font-weight: 700;
+  color: var(--green);
+  text-shadow: 0 0 12px var(--green-dim);
+  line-height: 1;
+}
+.metric-unit { font-size: 0.58rem; color: var(--text-dim); font-family: var(--font-mono); margin-left: 2px; }
+
+/* ══════════════════════════════════════
+   RIGHT COLUMN
+══════════════════════════════════════ */
+.right { display: flex; flex-direction: column; gap: var(--gap); }
+
+/* ─ BPM card ─ */
+.bpm-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 14px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.4s, box-shadow 0.4s;
+}
+.bpm-card::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: radial-gradient(ellipse at 50% 110%, rgba(0,255,136,0.07) 0%, transparent 65%);
+  pointer-events: none;
+}
+.bpm-card.high { border-color: var(--red); box-shadow: 0 0 24px rgba(255,48,96,0.2), inset 0 0 20px rgba(255,48,96,0.04); }
+.bpm-card.low  { border-color: var(--yellow); box-shadow: 0 0 20px rgba(255,214,10,0.15), inset 0 0 20px rgba(255,214,10,0.04); }
+
+.heart-icon {
+  font-size: 1.5rem;
+  display: inline-block;
+  color: var(--green);
+  filter: drop-shadow(0 0 6px var(--green-dim));
+  transition: color 0.4s;
+}
+.heart-icon.beat { animation: heartbeat 0.28s cubic-bezier(0.25,0.46,0.45,0.94); }
+@keyframes heartbeat { 0%{transform:scale(1)} 40%{transform:scale(1.5)} 100%{transform:scale(1)} }
+
+.bpm-number {
+  font-family: var(--font-display);
+  font-size: 3.8rem;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--green);
+  text-shadow: 0 0 30px var(--green-dim), 0 0 60px rgba(0,255,136,0.12);
+  letter-spacing: -0.02em;
+  margin: 4px 0;
+  transition: color 0.4s, text-shadow 0.4s;
+}
+.bpm-number.high { color: var(--red); text-shadow: 0 0 30px var(--red); }
+.bpm-number.low  { color: var(--yellow); text-shadow: 0 0 30px var(--yellow); }
+
+.bpm-unit-lbl { font-size: 0.57rem; color: var(--text-dim); letter-spacing: 0.3em; margin-bottom: 8px; }
+
+.rhythm-tag {
+  font-size: 0.62rem; letter-spacing: 0.12em;
+  padding: 3px 12px; border-radius: 20px;
+  border: 1px solid var(--border);
+  color: var(--green);
+  background: rgba(0,255,136,0.04);
+  display: inline-block;
+  transition: all 0.4s;
+}
+.rhythm-tag.tachy { border-color: var(--red); color: var(--red); background: rgba(255,48,96,0.07); animation: blink 1s infinite; }
+.rhythm-tag.brady { border-color: var(--yellow); color: var(--yellow); background: rgba(255,214,10,0.05); animation: blink 1s infinite; }
+
+.mini-wrap {
+  height: 38px;
+  margin-top: 10px;
+  background: #010e06;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+#miniCanvas { width: 100%; height: 100%; display: block; }
+
+/* ─ ECG value card ─ */
+.ecgval-card {}
+.ecg-raw-display {
+  font-family: var(--font-display);
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--cyan);
+  text-shadow: 0 0 14px rgba(0,229,255,0.4);
+  margin: 6px 0 2px;
+  letter-spacing: 0.04em;
+  transition: all 0.1s;
+}
+.ecg-raw-bar-wrap {
+  height: 6px;
+  background: rgba(0,0,0,0.4);
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-top: 6px;
+}
+.ecg-raw-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--green-dim), var(--cyan));
+  border-radius: 3px;
+  transition: width 0.08s linear;
+  box-shadow: 0 0 8px rgba(0,229,255,0.4);
+  width: 0%;
+}
+.ecg-raw-lbl { font-size: 0.55rem; color: var(--text-muted); margin-top: 4px; letter-spacing: 0.1em; }
+
+/* ─ signal quality ─ */
+.sig-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 34px;
+  margin-top: 8px;
+}
+.sig-bar {
+  flex: 1;
+  border-radius: 2px 2px 0 0;
+  background: var(--border);
+  transition: background 0.5s, box-shadow 0.5s;
+}
+.sig-bar.lit { background: var(--green); box-shadow: 0 0 10px var(--green-dim); }
+.sig-bar:nth-child(1) { height: 22%; }
+.sig-bar:nth-child(2) { height: 40%; }
+.sig-bar:nth-child(3) { height: 58%; }
+.sig-bar:nth-child(4) { height: 76%; }
+.sig-bar:nth-child(5) { height: 94%; }
+.sig-qual-txt { font-size: 0.62rem; color: var(--text-dim); margin-top: 5px; letter-spacing: 0.1em; }
+
+/* ─ alerts ─ */
+.alert-card { flex: 1; display: flex; flex-direction: column; }
+.alert-list {
+  flex: 1;
+  list-style: none;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 130px;
+}
+.alert-list::-webkit-scrollbar { width: 3px; }
+.alert-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.alert-item {
+  font-size: 0.6rem;
+  padding: 5px 8px;
+  border-radius: 3px;
+  border-left: 2px solid var(--text-muted);
+  color: var(--text-dim);
+  background: rgba(255,255,255,0.012);
+  line-height: 1.4;
+  animation: slide-in 0.2s ease-out;
+}
+@keyframes slide-in { from{transform:translateX(-5px);opacity:0} to{transform:none;opacity:1} }
+.alert-item.ok     { border-color: var(--green);  color: var(--green); }
+.alert-item.warn   { border-color: var(--yellow); color: var(--yellow); background: rgba(255,214,10,0.04); }
+.alert-item.danger { border-color: var(--red);    color: var(--red);    background: rgba(255,48,96,0.05); }
+.alert-item.info   { border-color: var(--cyan);   color: var(--cyan);   background: rgba(0,229,255,0.04); }
+
+/* ══════════════════════════════════════
+   FOOTER
+══════════════════════════════════════ */
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.58rem;
+  color: var(--text-dim);
+}
+.footer-row { display: flex; gap: 18px; align-items: center; }
+.foot-sep { color: var(--border); }
+
+/* ══════════════════════════════════════
+   CONNECT MODAL
+══════════════════════════════════════ */
+.modal-bg {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.78);
+  backdrop-filter: blur(5px);
+  z-index: 9999;
+  align-items: center;
+  justify-content: center;
+}
+.modal-bg.open { display: flex; }
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border-hi);
+  border-radius: 9px;
+  padding: 26px 26px 22px;
+  width: min(430px, 94vw);
+  box-shadow: 0 0 60px rgba(0,255,136,0.07), 0 20px 60px rgba(0,0,0,0.6);
+  position: relative;
+}
+.modal-title {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--green);
+  letter-spacing: 0.2em;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.modal-title::before {
+  content: '';
+  width: 3px; height: 15px;
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green);
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.modal-close {
+  position: absolute; top: 14px; right: 14px;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  width: 26px; height: 26px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.85rem;
+  transition: border-color 0.2s, color 0.2s;
+}
+.modal-close:hover { border-color: var(--red); color: var(--red); }
+.modal-info {
+  background: rgba(0,229,255,0.05);
+  border: 1px solid rgba(0,229,255,0.15);
+  border-radius: 5px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  font-size: 0.59rem;
+  color: rgba(0,229,255,0.7);
+  line-height: 1.75;
+  letter-spacing: 0.05em;
+}
+.modal-info strong { color: var(--cyan); }
+.modal-lbl { display: block; font-size: 0.58rem; color: var(--text-dim); letter-spacing: 0.18em; margin-bottom: 7px; }
+.modal-ip {
+  width: 100%;
+  background: rgba(0,0,0,0.5);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 10px 14px;
+  outline: none;
+  margin-bottom: 16px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.modal-ip:focus { border-color: var(--green-dim); box-shadow: 0 0 0 2px rgba(0,255,136,0.08); }
+.modal-ip::placeholder { color: var(--text-muted); }
+.modal-btns { display: flex; gap: 10px; }
+.modal-btn-conn {
+  flex: 1; padding: 10px;
+  background: rgba(0,255,136,0.1);
+  border: 1px solid var(--green-dim);
+  border-radius: 5px;
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.modal-btn-conn:hover { background: rgba(0,255,136,0.2); box-shadow: 0 0 20px rgba(0,255,136,0.15); }
+.modal-btn-sim {
+  padding: 10px 16px;
+  background: rgba(196,122,255,0.1);
+  border: 1px solid rgba(196,122,255,0.35);
+  border-radius: 5px;
+  color: var(--purple);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.modal-btn-sim:hover { background: rgba(196,122,255,0.2); }
+
+/* Mobile FAB */
+.fab {
+  display: none;
+  position: fixed; bottom: 18px; right: 18px;
+  z-index: 500;
+  background: rgba(0,255,136,0.1);
+  border: 1px solid var(--green-dim);
+  border-radius: 50%;
+  width: 50px; height: 50px;
+  align-items: center; justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 0 20px rgba(0,255,136,0.2);
+  font-size: 1.2rem; color: var(--green);
+  transition: background 0.2s, transform 0.15s;
+}
+.fab:hover { background: rgba(0,255,136,0.2); transform: scale(1.08); }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 55px; left: 50%;
+  transform: translateX(-50%) translateY(16px);
+  background: var(--panel);
+  border: 1px solid var(--yellow);
+  border-radius: 6px;
+  padding: 9px 18px;
+  font-size: 0.68rem; color: var(--yellow);
+  letter-spacing: 0.1em;
+  opacity: 0;
+  transition: all 0.3s;
+  z-index: 9999;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ══════════════════════════════════════
+   RESPONSIVE
+══════════════════════════════════════ */
+@media (max-width: 1024px) {
+  .main { grid-template-columns: 1fr; }
+  .right { display: grid; grid-template-columns: repeat(4,1fr); gap: var(--gap); }
+  .bpm-card { grid-column: span 2; }
+  .ecgval-card { grid-column: span 2; }
+  .alert-card { grid-column: span 4; max-height: 90px; }
+  .ecg-wrap { min-height: 220px; }
+  .chip-row { display: none; }
+  .fab { display: flex; }
+}
+@media (max-width: 700px) {
+  .app { padding: 6px; gap: 6px; }
+  header { padding: 0 10px; }
+  .logo { font-size: 0.85rem; }
+  .ctrl-bar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .ctrl-sep { display: none; }
+  .ip-field { width: 120px; font-size: 0.75rem; }
+  .metrics-row { grid-template-columns: repeat(2,1fr); }
+  .metric-val { font-size: 1.1rem; }
+  .right { grid-template-columns: repeat(2,1fr); }
+  .bpm-card { grid-column: span 2; }
+  .ecgval-card { grid-column: span 2; }
+  .alert-card { grid-column: span 2; }
+  .bpm-number { font-size: 3rem; }
+  .ecg-wrap { min-height: 170px; }
+  .clock { font-size: 0.8rem; }
+}
+@media (max-width: 400px) {
+  .bpm-number { font-size: 2.5rem; }
+  .ecg-wrap { min-height: 145px; }
+  .metrics-row { gap: 6px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ════════════════════════ HEADER ════════════════════════ -->
+<header>
+  <div class="logo">ECG<em>MONITOR</em> <em style="font-size:0.52rem;vertical-align:middle">v3.0</em></div>
+
+  <div class="header-meta">
+    <div class="chip-row">
+      <div class="chip"><span class="chip-lbl">LEAD</span><span class="chip-val">II</span></div>
+      <div class="chip"><span class="chip-lbl">SPEED</span><span class="chip-val">25mm/s</span></div>
+      <div class="chip"><span class="chip-lbl">GAIN</span><span class="chip-val">10mm/mV</span></div>
+      <div class="chip"><span class="chip-lbl">FILTER</span><span class="chip-val">40Hz</span></div>
+    </div>
+    <div class="clock" id="clock">00:00:00</div>
+    <div class="status-badge sim" id="statusBadge">
+      <div class="dot sim" id="dot"></div>
+      <span id="statusText">SIMULATION</span>
+    </div>
+  </div>
+</header>
+
+<!-- ════════════════════════ CONTROL BAR ════════════════════════ -->
+<div class="ctrl-bar">
+  <div class="ctrl-group">
+    <span class="ctrl-lbl">ESP32 IP</span>
+    <input class="ip-field" id="ipInput" type="text" placeholder="192.168.4.1" value="192.168.4.1" autocomplete="off" spellcheck="false">
+    <button class="btn btn-connect" id="btnConnect" onclick="doConnect()">⚡ CONNECT</button>
+    <button class="btn btn-disconnect" id="btnDisc" onclick="doDisconnect()">✕ DISCONNECT</button>
+    <button class="btn btn-sim" id="btnSim" onclick="doForceSim()">◎ SIMULATION</button>
+  </div>
+  <div class="ctrl-sep"></div>
+  <span class="reconn-label" id="reconnLabel">RETRY IN <span id="retryCount">5</span>s…</span>
+  <div class="ctrl-group" id="simModeGroup">
+    <span class="ctrl-lbl">SIM</span>
+    <button class="btn-mode active" id="mNormal"  onclick="setSimMode('normal')">NORMAL</button>
+    <button class="btn-mode"        id="mTachy"   onclick="setSimMode('tachy')">TACHY 130</button>
+    <button class="btn-mode"        id="mBrady"   onclick="setSimMode('brady')">BRADY 40</button>
+    <button class="btn-mode"        id="mNoisy"   onclick="setSimMode('noisy')">NOISY</button>
+    <button class="btn-mode"        id="mLeadoff" onclick="setSimMode('leadoff')">LEAD OFF</button>
+  </div>
+</div>
+
+<!-- ════════════════════════ MAIN ════════════════════════ -->
+<div class="main">
+
+  <!-- LEFT COLUMN -->
+  <div class="left">
+
+    <!-- ECG WAVEFORM -->
+    <div class="card ecg-card">
+      <div class="card-hdr">LEAD II — REAL-TIME ECG WAVEFORM</div>
+      <div class="ecg-wrap">
+        <canvas id="ecgCanvas"></canvas>
+        <div class="ecg-overlay-tl">LEAD II</div>
+        <div class="ecg-overlay-tr">10 mm/mV · 25 mm/s</div>
+        <div class="ecg-mode-tag sim" id="modeTag">◎ SIMULATION</div>
+        <div class="lead-off" id="leadOff">
+          <div class="lead-off-icon">⚠</div>
+          <div class="lead-off-text">LEADS DISCONNECTED</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- METRICS -->
+    <div class="metrics-row">
+      <div class="metric">
+        <div class="metric-lbl">HEART RATE</div>
+        <div class="metric-val" id="mBpm">---<span class="metric-unit">bpm</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-lbl">RR INTERVAL</div>
+        <div class="metric-val" id="mRR">---<span class="metric-unit">ms</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-lbl">SAMPLE RATE</div>
+        <div class="metric-val" id="mSPS">250<span class="metric-unit">Hz</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-lbl">PEAKS FOUND</div>
+        <div class="metric-val" id="mPeaks">0</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN -->
+  <div class="right">
+
+    <!-- BPM LARGE DISPLAY -->
+    <div class="bpm-card" id="bpmCard">
+      <div class="heart-icon" id="heartEl">♥</div>
+      <div class="bpm-number" id="bpmNumber">---</div>
+      <div class="bpm-unit-lbl">BEATS / MINUTE</div>
+      <div class="rhythm-tag" id="rhythmTag">NORMAL SINUS RHYTHM</div>
+      <div class="mini-wrap"><canvas id="miniCanvas"></canvas></div>
+    </div>
+
+    <!-- LIVE ECG VALUE -->
+    <div class="card ecgval-card">
+      <div class="card-hdr">LIVE ECG VALUE</div>
+      <div class="ecg-raw-display" id="rawVal">----</div>
+      <div class="ecg-raw-lbl">ADC RAW (0 – 4095)</div>
+      <div class="ecg-raw-bar-wrap">
+        <div class="ecg-raw-bar" id="rawBar"></div>
+      </div>
+    </div>
+
+    <!-- SIGNAL QUALITY -->
+    <div class="card">
+      <div class="card-hdr">SIGNAL QUALITY</div>
+      <div class="sig-bars" id="sigBars">
+        <div class="sig-bar"></div>
+        <div class="sig-bar"></div>
+        <div class="sig-bar"></div>
+        <div class="sig-bar"></div>
+        <div class="sig-bar"></div>
+      </div>
+      <div class="sig-qual-txt" id="sigText">ACQUIRING…</div>
+    </div>
+
+    <!-- SYSTEM ALERTS -->
+    <div class="card alert-card">
+      <div class="card-hdr">SYSTEM ALERTS</div>
+      <ul class="alert-list" id="alertList">
+        <li class="alert-item info">[BOOT] System ready — simulation mode active</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════ FOOTER ════════════════════════ -->
+<footer>
+  <div class="footer-row">
+    <span>ESP32 + AD8232 · ECG MONITOR v3.0</span>
+    <span class="foot-sep">|</span>
+    <span id="fMode">MODE: SIMULATION</span>
+    <span class="foot-sep">|</span>
+    <span id="fPkts">PKT: 0</span>
+    <span class="foot-sep">|</span>
+    <span id="fSmp">SMP: 0</span>
+  </div>
+  <div class="footer-row">
+    <span>250 Hz · 12-BIT ADC · BANDPASS 0.5–40 Hz</span>
+  </div>
+</footer>
+
+<!-- ════════════════════════ MODAL ════════════════════════ -->
+<div class="modal-bg" id="modal">
+  <div class="modal">
+    <div class="modal-title">CONNECT TO ESP32</div>
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-info">
+      <strong>WiFi SSID:</strong> ECG_MONITOR &nbsp;|&nbsp; <strong>Password:</strong> 12345678<br>
+      Connect your device to the ESP32 hotspot, then enter the IP below.<br>
+      Default ESP32 AP address: <strong>192.168.4.1</strong> &nbsp; WebSocket port: <strong>81</strong>
+    </div>
+    <label class="modal-lbl" for="modalIp">ESP32 IP ADDRESS</label>
+    <input class="modal-ip" id="modalIp" type="text" placeholder="192.168.4.1" value="192.168.4.1" autocomplete="off" spellcheck="false">
+    <div class="modal-btns">
+      <button class="modal-btn-conn" onclick="connectFromModal()">⚡ CONNECT LIVE</button>
+      <button class="modal-btn-sim" onclick="simFromModal()">◎ SIMULATION</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast notification -->
+<div class="toast" id="toast"></div>
+
+<!-- Mobile FAB -->
+<button class="fab" onclick="openModal()" title="Connect to ESP32">⚡</button>
+
+</div><!-- /app -->
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     JAVASCRIPT — Three clean modules:
+       1. SIMULATION ENGINE  — generates synthetic ECG
+       2. WEBSOCKET MODULE   — handles connection / state machine
+       3. RENDERING ENGINE   — canvas drawing at 60 fps
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+"use strict";
+
+/* ══════════════════════════════════════
+   CONSTANTS
+══════════════════════════════════════ */
+const SAMPLE_RATE   = 250;         // Hz
+const VISIBLE_SEC   = 6;           // seconds shown
+const BUF_SIZE      = SAMPLE_RATE * VISIBLE_SEC; // 1500 samples
+const BPM_LOW       = 50;
+const BPM_HIGH      = 120;
+const WS_TIMEOUT_MS = 3000;        // 3 s to declare connect failed
+const RECONNECT_SEC = 5;
+
+/* ══════════════════════════════════════
+   STATE MACHINE
+══════════════════════════════════════ */
+const MODE = { SIM:'sim', CONNECTING:'connecting', LIVE:'live', DISC:'disc', LOST:'lost' };
+let appMode = MODE.SIM;
+
+/* ══════════════════════════════════════
+   SHARED SIGNAL BUFFERS
+══════════════════════════════════════ */
+let ecgBuf  = new Float32Array(BUF_SIZE).fill(0.5);
+let peakBuf = new Uint8Array(BUF_SIZE).fill(0);
+let writePos = 0;
+
+let currentBPM  = 0;
+let lastRaw     = 0;       // latest single ADC value (for raw display)
+let totalPeaks  = 0;
+let totalPkts   = 0;
+let totalSmp    = 0;
+let leadOff     = false;
+
+/* ══════════════════════════════════════
+   ▌MODULE 1 — SIMULATION ENGINE
+══════════════════════════════════════ */
+const SIM_MODES = {
+  normal:  { bpm: 72,  noise: 0.012 },
+  tachy:   { bpm: 130, noise: 0.018 },
+  brady:   { bpm: 40,  noise: 0.010 },
+  noisy:   { bpm: 72,  noise: 0.15  },
+  leadoff: { bpm: 0,   noise: 0.5   },
+};
+
+let simMode   = 'normal';
+let simPhase  = 0;
+let simTimer  = null;
+
+function _gauss(x, mu, sigma, amp) {
+  return amp * Math.exp(-0.5 * ((x - mu) / sigma) ** 2);
+}
+// Realistic PQRST morphology via sum of gaussians
+function _pqrst(phase) {
+  return (
+    _gauss(phase, 0.15,  0.035,  0.08)  +   // P
+    _gauss(phase, 0.40,  0.012, -0.07)  +   // Q
+    _gauss(phase, 0.43,  0.018,  0.85)  +   // R
+    _gauss(phase, 0.465, 0.012, -0.15)  +   // S
+    _gauss(phase, 0.62,  0.055,  0.18)      // T
+  );
+}
+
+function _simTick() {
+  const cfg      = SIM_MODES[simMode] || SIM_MODES.normal;
+  const beatSamp = cfg.bpm > 0 ? SAMPLE_RATE / (cfg.bpm / 60) : 9999;
+
+  // Generate 5 samples per 20 ms tick → 250 Hz equivalent
+  for (let i = 0; i < 5; i++) {
+    simPhase += 1.0 / beatSamp;
+    let isPeak = false;
+    if (simPhase >= 1.0) { simPhase -= 1.0; isPeak = true; }
+
+    let raw, val;
+    if (simMode === 'leadoff') {
+      val = 0.5 + (Math.random() - 0.5) * 0.6;
+      raw = Math.round(val * 4095);
+    } else {
+      val = 0.5 + _pqrst(simPhase) * 0.5 + (Math.random() - 0.5) * cfg.noise;
+      val = Math.max(0, Math.min(1, val));
+      raw = Math.round(val * 4095);
+    }
+
+    _writeSample(val, raw, isPeak);
+  }
+
+  // Update BPM/RR from sim config
+  const bpm = cfg.bpm;
+  if (bpm !== currentBPM) {
+    currentBPM = bpm;
+    updateBPMDisplay(bpm);
+  }
+  if (bpm > 0) {
+    const rr = Math.round(60000 / bpm);
+    _setMetrics(bpm, rr);
+  }
+  updateSignalQuality(simMode === 'leadoff');
+}
+
+function startSim(reason) {
+  if (simTimer) return;
+  simTimer = setInterval(_simTick, 20);
+  if (reason) addAlert(reason, 'warn');
+  addAlert('Simulation mode — demo ECG waveform active', 'info');
+}
+
+function stopSim() {
+  if (simTimer) { clearInterval(simTimer); simTimer = null; }
+}
+
+function setSimMode(mode) {
+  simMode = mode;
+  ['Normal','Tachy','Brady','Noisy','Leadoff'].forEach(n => {
+    document.getElementById('m' + n)?.classList.remove('active');
+  });
+  const idMap = { normal:'mNormal', tachy:'mTachy', brady:'mBrady', noisy:'mNoisy', leadoff:'mLeadoff' };
+  document.getElementById(idMap[mode])?.classList.add('active');
+}
+
+/* ══════════════════════════════════════
+   ▌MODULE 2 — WEBSOCKET / CONNECTION
+══════════════════════════════════════ */
+let ws            = null;
+let wsConnTimer   = null;
+let wsReconTimer  = null;
+let retrySec      = RECONNECT_SEC;
+let lastIP        = '';
+
+function doConnect(overrideIP) {
+  const ip = overrideIP || document.getElementById('ipInput').value.trim();
+  if (!ip) { showToast('Please enter the ESP32 IP address'); return; }
+
+  // Cancel pending timers
+  _cancelRecon();
+
+  // Clean up existing socket
+  if (ws) { try { ws.onclose = null; ws.close(); } catch(_){} ws = null; }
+
+  lastIP = ip;
+  _setMode(MODE.CONNECTING);
+  addAlert(`Connecting → ws://${ip}:81 …`, 'info');
+
+  ws = new WebSocket(`ws://${ip}:81`);
+
+  // Timeout: if no open within WS_TIMEOUT_MS → back to sim
+  wsConnTimer = setTimeout(() => {
+    if (appMode === MODE.CONNECTING) {
+      addAlert(`Connection timeout after ${WS_TIMEOUT_MS/1000}s — returning to simulation`, 'warn');
+      showToast('Connection timed out — simulation mode');
+      _fallbackSim();
+    }
+  }, WS_TIMEOUT_MS);
+
+  ws.onopen = () => {
+    clearTimeout(wsConnTimer);
+    stopSim();
+    _setMode(MODE.LIVE);
+    document.getElementById('ipInput').value = ip;
+    addAlert(`✓ Connected to ESP32 @ ${ip}:81`, 'ok');
+    showToast('Connected — Live ESP32 data');
+  };
+
+  ws.onmessage = (e) => {
+    totalPkts++;
+    try {
+      const msg = JSON.parse(e.data);
+      /*
+       * Expected format from ESP32:
+       *   { "ecg": <number 0-4095>, "bpm": <number> }
+       *
+       * Also supports extended format:
+       *   { "ecg": N, "bpm": N, "rr": N, "peak": bool, "leadOff": bool }
+       */
+      const raw  = (msg.ecg   !== undefined) ? Number(msg.ecg)  : 2048;
+      const bpm  = (msg.bpm   !== undefined) ? Number(msg.bpm)  : 0;
+      const rr   = (msg.rr    !== undefined) ? Number(msg.rr)   : (bpm > 0 ? Math.round(60000/bpm) : 0);
+      const peak = !!(msg.peak || false);
+      const lo   = !!(msg.leadOff || msg.lo || false);
+
+      const val  = Math.max(0, Math.min(1, raw / 4095));
+      _writeSample(val, raw, peak);
+      totalSmp++;
+
+      if (bpm !== currentBPM) { currentBPM = bpm; updateBPMDisplay(bpm); }
+      if (bpm > 0) _setMetrics(bpm, rr);
+      updateSignalQuality(lo, [raw]);
+      document.getElementById('fPkts').textContent = `PKT: ${totalPkts}`;
+      document.getElementById('fSmp').textContent  = `SMP: ${totalSmp}`;
+    } catch(_) {
+      // ignore malformed packet
+    }
+  };
+
+  ws.onclose = () => {
+    clearTimeout(wsConnTimer);
+    if (appMode === MODE.LIVE || appMode === MODE.LOST) {
+      addAlert('Connection lost — simulation fallback + auto-retry', 'warn');
+      _startRecon(ip);
+    } else if (appMode === MODE.CONNECTING) {
+      addAlert(`Could not connect to ws://${ip}:81`, 'danger');
+      showToast('Connection failed — check IP / WiFi');
+      _fallbackSim();
+    }
+  };
+
+  ws.onerror = () => {
+    // onerror always fires before onclose — onclose handles the fallback
+    if (appMode === MODE.CONNECTING) {
+      addAlert(`WebSocket error connecting to ${ip}:81`, 'danger');
+    }
+  };
+}
+
+function doDisconnect() {
+  _cancelRecon();
+  clearTimeout(wsConnTimer);
+  if (ws) { try { ws.onclose = null; ws.close(); } catch(_){} ws = null; }
+  addAlert('Manually disconnected', 'warn');
+  _fallbackSim();
+}
+
+function doForceSim() {
+  _cancelRecon();
+  clearTimeout(wsConnTimer);
+  if (ws) { try { ws.onclose = null; ws.close(); } catch(_){} ws = null; }
+  _fallbackSim();
+}
+
+function _fallbackSim() {
+  _setMode(MODE.SIM);
+  startSim();
+}
+
+function _startRecon(ip) {
+  _setMode(MODE.LOST);
+  startSim('Live connection lost — simulation fallback active');
+
+  retrySec = RECONNECT_SEC;
+  document.getElementById('retryCount').textContent = retrySec;
+
+  wsReconTimer = setInterval(() => {
+    retrySec--;
+    document.getElementById('retryCount').textContent = Math.max(0, retrySec);
+    if (retrySec <= 0) {
+      _cancelRecon();
+      addAlert(`Auto-reconnecting to ${ip}…`, 'warn');
+      stopSim();
+      doConnect(ip);
+    }
+  }, 1000);
+}
+
+function _cancelRecon() {
+  if (wsReconTimer) { clearInterval(wsReconTimer); wsReconTimer = null; }
+  document.getElementById('reconnLabel').classList.remove('show');
+}
+
+/* ──────────────────────────────────────
+   UI STATE MACHINE — updates all DOM
+──────────────────────────────────────── */
+function _setMode(mode) {
+  appMode = mode;
+
+  const badge   = document.getElementById('statusBadge');
+  const dot     = document.getElementById('dot');
+  const sText   = document.getElementById('statusText');
+  const modeTag = document.getElementById('modeTag');
+  const fMode   = document.getElementById('fMode');
+  const simGrp  = document.getElementById('simModeGroup');
+  const btnConn = document.getElementById('btnConnect');
+  const btnDisc = document.getElementById('btnDisc');
+  const reconn  = document.getElementById('reconnLabel');
+
+  // Reset classes
+  badge.className = 'status-badge';
+  dot.className   = 'dot';
+
+  const show = (el, vis) => el.style.display = vis ? '' : 'none';
+
+  if (mode === MODE.SIM) {
+    badge.classList.add('sim'); dot.classList.add('sim');
+    sText.textContent     = 'SIMULATION';
+    modeTag.className     = 'ecg-mode-tag sim';
+    modeTag.textContent   = '◎ SIMULATION';
+    fMode.textContent     = 'MODE: SIMULATION';
+    show(simGrp, true); show(btnConn, true); show(btnDisc, false);
+    btnConn.disabled      = false;
+    reconn.classList.remove('show');
+  }
+  else if (mode === MODE.CONNECTING) {
+    badge.classList.add('conn'); dot.classList.add('conn');
+    sText.textContent     = 'CONNECTING…';
+    modeTag.className     = 'ecg-mode-tag sim';
+    modeTag.textContent   = '◌ CONNECTING…';
+    fMode.textContent     = 'MODE: CONNECTING';
+    show(simGrp, false); show(btnConn, true); show(btnDisc, false);
+    btnConn.disabled      = true;
+    reconn.classList.remove('show');
+  }
+  else if (mode === MODE.LIVE) {
+    badge.classList.add('live'); dot.classList.add('live');
+    sText.textContent     = 'CONNECTED';
+    modeTag.className     = 'ecg-mode-tag live';
+    modeTag.textContent   = '⚡ LIVE ESP32';
+    fMode.textContent     = 'MODE: LIVE';
+    show(simGrp, false); show(btnConn, false); show(btnDisc, true);
+    btnConn.disabled      = false;
+    reconn.classList.remove('show');
+  }
+  else if (mode === MODE.DISC) {
+    badge.classList.add('disc'); dot.classList.add('disc');
+    sText.textContent     = 'DISCONNECTED';
+    modeTag.className     = 'ecg-mode-tag sim';
+    modeTag.textContent   = '✕ DISCONNECTED';
+    fMode.textContent     = 'MODE: DISCONNECTED';
+    show(simGrp, true); show(btnConn, true); show(btnDisc, false);
+    btnConn.disabled      = false;
+    reconn.classList.remove('show');
+  }
+  else if (mode === MODE.LOST) {
+    badge.classList.add('lost'); dot.classList.add('lost');
+    sText.textContent     = 'SIGNAL LOST';
+    modeTag.className     = 'ecg-mode-tag sim';
+    modeTag.textContent   = '⚠ RECONNECTING…';
+    fMode.textContent     = 'MODE: RECONNECTING';
+    show(simGrp, true); show(btnConn, true); show(btnDisc, false);
+    btnConn.disabled      = false;
+    reconn.classList.add('show');
+  }
+}
+
+/* ══════════════════════════════════════
+   SHARED WRITE — both modules feed here
+══════════════════════════════════════ */
+let spsCount  = 0;
+let spsLast   = Date.now();
+
+function _writeSample(normVal, rawADC, isPeak) {
+  ecgBuf[writePos]  = normVal;
+  peakBuf[writePos] = isPeak ? 1 : 0;
+  writePos = (writePos + 1) % BUF_SIZE;
+
+  // Update raw value display
+  lastRaw = rawADC;
+  document.getElementById('rawVal').textContent = rawADC;
+  document.getElementById('rawBar').style.width = (rawADC / 4095 * 100).toFixed(1) + '%';
+
+  if (isPeak) {
+    totalPeaks++;
+    _triggerHeart();
+    document.getElementById('mPeaks').textContent = totalPeaks;
+  }
+
+  // Approx SPS
+  spsCount++;
+  const now = Date.now();
+  if (now - spsLast >= 1000) {
+    document.getElementById('mSPS').innerHTML = `${spsCount}<span class="metric-unit">Hz</span>`;
+    spsCount = 0; spsLast = now;
+  }
+
+  // Lead-off
+  document.getElementById('leadOff').classList.toggle('show', leadOff);
+}
+
+function _setMetrics(bpm, rr) {
+  document.getElementById('mBpm').innerHTML = `${bpm}<span class="metric-unit">bpm</span>`;
+  document.getElementById('mRR').innerHTML  = `${rr}<span class="metric-unit">ms</span>`;
+}
+
+/* ══════════════════════════════════════
+   ▌MODULE 3 — RENDERING ENGINE
+══════════════════════════════════════ */
+const mainCvs = document.getElementById('ecgCanvas');
+const mainCtx = mainCvs.getContext('2d');
+const miniCvs = document.getElementById('miniCanvas');
+const miniCtx = miniCvs.getContext('2d');
+
+function resizeCanvases() {
+  const dpr = window.devicePixelRatio || 1;
+  [mainCvs, miniCvs].forEach(c => {
+    c.width  = c.offsetWidth  * dpr;
+    c.height = c.offsetHeight * dpr;
+  });
+}
+resizeCanvases();
+window.addEventListener('resize', resizeCanvases);
+
+// ─ Main ECG waveform ─────────────────
+function drawMain() {
+  const W = mainCvs.width, H = mainCvs.height;
+  const dpr = window.devicePixelRatio || 1;
+
+  mainCtx.clearRect(0, 0, W, H);
+
+  // ── ECG grid (fine + coarse) ──
+  const gx = W / 30, gy = H / 8;
+  mainCtx.lineWidth   = 0.5;
+  mainCtx.strokeStyle = 'rgba(0,255,136,0.04)';
+  for (let x = 0; x <= W; x += gx) { mainCtx.beginPath(); mainCtx.moveTo(x,0); mainCtx.lineTo(x,H); mainCtx.stroke(); }
+  for (let y = 0; y <= H; y += gy) { mainCtx.beginPath(); mainCtx.moveTo(0,y); mainCtx.lineTo(W,y); mainCtx.stroke(); }
+  mainCtx.lineWidth   = 0.8;
+  mainCtx.strokeStyle = 'rgba(0,255,136,0.10)';
+  for (let x = 0; x <= W; x += gx*5) { mainCtx.beginPath(); mainCtx.moveTo(x,0); mainCtx.lineTo(x,H); mainCtx.stroke(); }
+  for (let y = 0; y <= H; y += gy*4) { mainCtx.beginPath(); mainCtx.moveTo(0,y); mainCtx.lineTo(W,y); mainCtx.stroke(); }
+
+  // Connecting placeholder
+  if (appMode === MODE.CONNECTING) {
+    mainCtx.fillStyle  = 'rgba(0,229,255,0.22)';
+    mainCtx.font       = `${13*dpr}px "Share Tech Mono"`;
+    mainCtx.textAlign  = 'center';
+    mainCtx.fillText('CONNECTING TO ESP32…', W/2, H/2);
+    return;
+  }
+
+  const margin = H * 0.1;
+  const drawH  = H - margin * 2;
+  const stepX  = W / BUF_SIZE;
+  const curX   = writePos * stepX;
+
+  // Erase zone ahead of write head (sweep effect)
+  mainCtx.fillStyle = '#010e06';
+  mainCtx.fillRect(curX, 0, Math.min(W * 0.045, 28 * dpr), H);
+
+  // ── Glow trace ──
+  mainCtx.save();
+  mainCtx.shadowColor = '#00ff88';
+  mainCtx.shadowBlur  = 14 * dpr;
+  mainCtx.strokeStyle = 'rgba(0,255,136,0.26)';
+  mainCtx.lineWidth   = 3 * dpr;
+  mainCtx.lineJoin    = 'round';
+  mainCtx.beginPath();
+  let first = true;
+  for (let i = 0; i < BUF_SIZE; i++) {
+    const idx = (writePos + i) % BUF_SIZE;
+    const x = i * stepX;
+    const y = margin + (1 - ecgBuf[idx]) * drawH;
+    first ? mainCtx.moveTo(x, y) : mainCtx.lineTo(x, y);
+    first = false;
+  }
+  mainCtx.stroke();
+  mainCtx.restore();
+
+  // ── Main crisp trace ──
+  mainCtx.strokeStyle = '#00ff88';
+  mainCtx.lineWidth   = 1.6 * dpr;
+  mainCtx.lineJoin    = 'round';
+  mainCtx.beginPath();
+  first = true;
+  for (let i = 0; i < BUF_SIZE; i++) {
+    const idx = (writePos + i) % BUF_SIZE;
+    const x = i * stepX;
+    const y = margin + (1 - ecgBuf[idx]) * drawH;
+    first ? mainCtx.moveTo(x, y) : mainCtx.lineTo(x, y);
+    first = false;
+  }
+  mainCtx.stroke();
+
+  // ── R-peak markers (red diamonds) ──
+  mainCtx.fillStyle   = '#ff3060';
+  mainCtx.strokeStyle = 'rgba(255,48,96,0.22)';
+  mainCtx.lineWidth   = 0.8;
+  for (let i = 0; i < BUF_SIZE; i++) {
+    const idx = (writePos + i) % BUF_SIZE;
+    if (!peakBuf[idx]) continue;
+    const x = i * stepX;
+    const y = margin + (1 - ecgBuf[idx]) * drawH;
+    const r = 4 * dpr;
+    // Diamond
+    mainCtx.beginPath();
+    mainCtx.moveTo(x, y - r); mainCtx.lineTo(x + r*0.7, y);
+    mainCtx.lineTo(x, y + r); mainCtx.lineTo(x - r*0.7, y);
+    mainCtx.closePath(); mainCtx.fill();
+    // Vertical drop line
+    mainCtx.beginPath(); mainCtx.moveTo(x, margin); mainCtx.lineTo(x, y - r); mainCtx.stroke();
+  }
+}
+
+// ─ Mini rhythm strip ─────────────────
+function drawMini() {
+  const W = miniCvs.width, H = miniCvs.height;
+  miniCtx.clearRect(0, 0, W, H);
+  miniCtx.strokeStyle = 'rgba(0,255,136,0.55)';
+  miniCtx.lineWidth   = 1;
+  miniCtx.beginPath();
+  const step = W / BUF_SIZE;
+  const mg   = H * 0.1;
+  let first  = true;
+  for (let i = 0; i < BUF_SIZE; i++) {
+    const idx = (writePos + i) % BUF_SIZE;
+    const x = i * step;
+    const y = mg + (1 - ecgBuf[idx]) * (H - mg*2);
+    first ? miniCtx.moveTo(x, y) : miniCtx.lineTo(x, y);
+    first = false;
+  }
+  miniCtx.stroke();
+}
+
+// ─ 60fps render loop ─────────────────
+function renderLoop() {
+  drawMain();
+  drawMini();
+  requestAnimationFrame(renderLoop);
+}
+
+/* ══════════════════════════════════════
+   UI HELPERS
+══════════════════════════════════════ */
+const BPM_LOG = {};
+
+function updateBPMDisplay(bpm) {
+  const numEl    = document.getElementById('bpmNumber');
+  const rhythmEl = document.getElementById('rhythmTag');
+  const cardEl   = document.getElementById('bpmCard');
+
+  numEl.textContent = bpm > 0 ? bpm : '---';
+
+  if (bpm > 0 && bpm < BPM_LOW) {
+    numEl.className    = 'bpm-number low';
+    rhythmEl.className = 'rhythm-tag brady';
+    rhythmEl.textContent = '⚠  BRADYCARDIA';
+    cardEl.className   = 'bpm-card low';
+    _throttleAlert(`Bradycardia — ${bpm} BPM (threshold < ${BPM_LOW})`, 'danger', 'brady');
+  } else if (bpm > BPM_HIGH) {
+    numEl.className    = 'bpm-number high';
+    rhythmEl.className = 'rhythm-tag tachy';
+    rhythmEl.textContent = '⚠  TACHYCARDIA';
+    cardEl.className   = 'bpm-card high';
+    _throttleAlert(`Tachycardia — ${bpm} BPM (threshold > ${BPM_HIGH})`, 'danger', 'tachy');
+  } else if (bpm > 0) {
+    numEl.className    = 'bpm-number';
+    rhythmEl.className = 'rhythm-tag';
+    rhythmEl.textContent = 'NORMAL SINUS RHYTHM';
+    cardEl.className   = 'bpm-card';
+  }
+}
+
+function _triggerHeart() {
+  const h = document.getElementById('heartEl');
+  h.classList.remove('beat');
+  void h.offsetWidth; // reflow to restart animation
+  h.classList.add('beat');
+}
+
+const SQ_LABELS = ['POOR','WEAK','FAIR','GOOD','EXCELLENT'];
+function updateSignalQuality(isLeadOff, samples) {
+  leadOff = !!isLeadOff;
+  const bars = document.querySelectorAll('#sigBars .sig-bar');
+  if (isLeadOff || !samples || !samples.length) {
+    bars.forEach(b => b.classList.remove('lit'));
+    document.getElementById('sigText').textContent = 'NO SIGNAL';
+    return;
+  }
+  const mean     = samples.reduce((a,b) => a+b, 0) / samples.length;
+  const variance = samples.reduce((s,v) => s + (v-mean)**2, 0) / samples.length;
+  const rms      = Math.sqrt(variance);
+  const q        = Math.min(5, Math.max(1, Math.round(rms / 80)));
+  bars.forEach((b, i) => b.classList.toggle('lit', i < q));
+  document.getElementById('sigText').textContent = SQ_LABELS[q - 1];
+}
+
+function _throttleAlert(msg, type, key) {
+  const now = Date.now();
+  if (BPM_LOG[key] && now - BPM_LOG[key] < 4000) return;
+  BPM_LOG[key] = now;
+  addAlert(msg, type);
+}
+
+function addAlert(msg, type = '') {
+  const list = document.getElementById('alertList');
+  const t    = new Date().toLocaleTimeString('en-US', { hour12: false });
+  const li   = document.createElement('li');
+  li.className   = 'alert-item ' + type;
+  li.textContent = `[${t}] ${msg}`;
+  list.insertBefore(li, list.firstChild);
+  while (list.children.length > 40) list.removeChild(list.lastChild);
+}
+
+let _toastTimer = null;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+function _tickClock() {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+setInterval(_tickClock, 1000);
+_tickClock();
+
+/* ══════════════════════════════════════
+   MODAL
+══════════════════════════════════════ */
+function openModal()  { document.getElementById('modal').classList.add('open'); document.getElementById('modalIp').focus(); }
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+document.getElementById('modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('modal')) closeModal();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+function connectFromModal() {
+  const ip = document.getElementById('modalIp').value.trim();
+  document.getElementById('ipInput').value = ip;
+  closeModal();
+  doConnect(ip);
+}
+function simFromModal() { closeModal(); doForceSim(); }
+
+// Keep IP inputs in sync
+['ipInput','modalIp'].forEach(id => {
+  document.getElementById(id).addEventListener('input', function() {
+    const other = id === 'ipInput' ? 'modalIp' : 'ipInput';
+    document.getElementById(other).value = this.value;
+  });
+});
+
+// Enter key in IP field triggers connect
+document.getElementById('ipInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doConnect();
+});
+
+/* ══════════════════════════════════════
+   BOOT SEQUENCE
+══════════════════════════════════════ */
+_setMode(MODE.SIM);
+startSim();
+requestAnimationFrame(renderLoop);
+</script>
+</body>
+</html>
